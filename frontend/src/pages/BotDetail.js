@@ -76,19 +76,29 @@ function BotDetail() {
     }
     
     return bot.stats.balance_history
-      .filter(item => new Date(item.timestamp) >= cutoffTime)
-      .map((item, index) => ({
-        index: index + 1,
-        time: new Date(item.timestamp).toLocaleString('en-US', { 
+      .filter(item => {
+        const itemDate = new Date(item.timestamp);
+        return !isNaN(itemDate.getTime()) && itemDate >= cutoffTime;
+      })
+      .map((item, index) => {
+        const date = new Date(item.timestamp);
+        const timeStr = date.toLocaleString('en-US', { 
           month: 'short', 
           day: 'numeric', 
           hour: '2-digit', 
-          minute: '2-digit' 
-        }),
-        balance: item.balance,
-        action: item.action,
-        pnl: item.pnl || 0
-      }));
+          minute: '2-digit',
+          hour12: false
+        });
+        
+        return {
+          index: index + 1,
+          time: timeStr,
+          timestamp: date.getTime(),
+          balance: item.balance,
+          action: item.action,
+          pnl: item.pnl || 0
+        };
+      });
   };
 
   if (loading) {
