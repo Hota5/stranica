@@ -11,6 +11,7 @@ function BotDetail() {
   const [loading, setLoading] = useState(true);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [chartView, setChartView] = useState('all'); // all, hour, day, week, month
 
   useEffect(() => {
     loadBot();
@@ -52,11 +53,42 @@ function BotDetail() {
   };
 
   const getChartData = () => {
-    if (!bot?.stats?.balance_history) return [];
-    return bot.stats.balance_history.map(item => ({
-      date: new Date(item.date).toLocaleDateString(),
-      balance: item.balance
-    }));
+    if (!bot?.stats?.balance_history || bot.stats.balance_history.length === 0) return [];
+    
+    const now = new Date();
+    let cutoffTime;
+    
+    switch(chartView) {
+      case 'hour':
+        cutoffTime = new Date(now.getTime() - 60 * 60 * 1000);
+        break;
+      case 'day':
+        cutoffTime = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        break;
+      case 'week':
+        cutoffTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        break;
+      case 'month':
+        cutoffTime = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        break;
+      default:
+        cutoffTime = new Date(0); // Show all
+    }
+    
+    return bot.stats.balance_history
+      .filter(item => new Date(item.timestamp) >= cutoffTime)
+      .map((item, index) => ({
+        index: index + 1,
+        time: new Date(item.timestamp).toLocaleString('en-US', { 
+          month: 'short', 
+          day: 'numeric', 
+          hour: '2-digit', 
+          minute: '2-digit' 
+        }),
+        balance: item.balance,
+        action: item.action,
+        pnl: item.pnl || 0
+      }));
   };
 
   if (loading) {
@@ -166,13 +198,37 @@ function BotDetail() {
         <div className="card" style={{ marginBottom: '2rem' }}>
           <div className="card-header">
             <h3>Balance Over Time</h3>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              {[
+                { label: 'All', value: 'all' },
+                { label: '1 Hour', value: 'hour' },
+                { label: '1 Day', value: 'day' },
+                { label: '1 Week', value: 'week' },
+                { label: '1 Month', value: 'month' }
+              ].map(option => (
+                <button
+                  key={option.value}
+                  className={`btn btn-small ${chartView === option.value ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setChartView(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
           </div>
           
           {getChartData().length > 0 ? (
             <ResponsiveContainer width="100%" height={300}>
               <LineChart data={getChartData()}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(102, 126, 234, 0.2)" />
-                <XAxis dataKey="date" stroke="#9ca3af" />
+                <XAxis 
+                  dataKey="time" 
+                  stroke="#9ca3af"
+                  tick={{ fontSize: 11 }}
+                  angle={-45}
+                  textAnchor="end"
+                  height={80}
+                />
                 <YAxis stroke="#9ca3af" />
                 <Tooltip 
                   contentStyle={{ 
@@ -180,14 +236,24 @@ function BotDetail() {
                     border: '1px solid rgba(102, 126, 234, 0.3)',
                     borderRadius: '8px'
                   }}
-                  formatter={(value) => formatCurrency(value)}
+                  formatter={(value, name) => {
+                    if (name === 'balance') return formatCurrency(value);
+                    if (name === 'pnl') return formatCurrency(value);
+                    return value;
+                  }}
+                  labelFormatter={(label) => `Trade: ${label}`}
                 />
                 <Line 
                   type="monotone" 
                   dataKey="balance" 
                   stroke="#667eea" 
                   strokeWidth={2}
-                  dot={{ fill: '#667eea' }}
+                  dot={(props) => {
+                    const { cx, cy, payload } = props;
+                    if (!payload.action || payload.action === 'start') return null;
+                    const color = payload.action === 'buy' ? '#10b981' : '#ef4444';
+                    return <circle cx={cx} cy={cy} r={4} fill={color} stroke="#fff" strokeWidth={1} />;
+                  }}
                 />
               </LineChart>
             </ResponsiveContainer>
@@ -207,43 +273,67 @@ function BotDetail() {
                 No trades recorded yet. Configure your TradingView alert to start tracking!
               </p>
             ) : (
-              bot.trades.map(trade => (
-                <div key={trade.id} className={`trade-card ${trade.action}`}>
-                  <div className="trade-info">
-                    <h4>
-                      {trade.action === 'buy' ? '📈 BUY' : '📉 SELL'} {trade.symbol}
-                    </h4>
-                    <div className="trade-details">
-                      <span>
-                        Signal: {formatCurrency(trade.signal_price)}
-                      </span>
-                      <span style={{ 
-                        color: trade.action === 'buy' ? '#ef4444' : '#10b981',
-                        fontWeight: '600' 
-                      }}>
-                        Filled: {formatCurrency(trade.execution_price)}
-                      </span>
-                      <span style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
-                        Slippage: {formatCurrency(Math.abs(trade.execution_price - trade.signal_price))}
-                      </span>
-                      <span>Contracts: {trade.contracts}</span>
-                      <span>Fee: {formatCurrency(trade.commission)}</span>
-                      {trade.action === 'sell' && (
-                        <span style={{ 
-                          fontWeight: '700',
-                          color: trade.pnl >= 0 ? '#10b981' : '#ef4444'
-                        }}>
-                          P&L: {formatCurrency(trade.pnl)}
+              bot.trades.map(trade => {
+                const tradeType = trade.trade_type || (trade.action === 'buy' ? 'BUY' : 'SELL');
+                const isOpening = tradeType.includes('OPEN');
+                const isLong = tradeType.includes('LONG');
+                const isShort = tradeType.includes('SHORT');
+                
+                let emoji = '📊';
+                let typeColor = '#667eea';
+                
+                if (tradeType === 'OPEN LONG') {
+                  emoji = '📈';
+                  typeColor = '#10b981';
+                } else if (tradeType === 'CLOSE LONG') {
+                  emoji = '🔒';
+                  typeColor = '#10b981';
+                } else if (tradeType === 'OPEN SHORT') {
+                  emoji = '📉';
+                  typeColor = '#ef4444';
+                } else if (tradeType === 'CLOSE SHORT') {
+                  emoji = '🔓';
+                  typeColor = '#ef4444';
+                }
+
+                return (
+                  <div key={trade.id} className={`trade-card ${trade.action}`}>
+                    <div className="trade-info">
+                      <h4 style={{ color: typeColor }}>
+                        {emoji} {tradeType} {trade.symbol}
+                      </h4>
+                      <div className="trade-details">
+                        <span>
+                          Signal: {formatCurrency(trade.signal_price)}
                         </span>
-                      )}
-                      <span>Balance: {formatCurrency(trade.balance_after)}</span>
-                    </div>
-                    <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: '#9ca3af' }}>
-                      {new Date(trade.timestamp).toLocaleString()}
+                        <span style={{ 
+                          color: trade.action === 'buy' ? '#ef4444' : '#10b981',
+                          fontWeight: '600' 
+                        }}>
+                          Filled: {formatCurrency(trade.execution_price)}
+                        </span>
+                        <span style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
+                          Slippage: {formatCurrency(Math.abs(trade.execution_price - trade.signal_price))}
+                        </span>
+                        <span>Contracts: {trade.contracts}</span>
+                        <span>Fee: {formatCurrency(trade.commission)}</span>
+                        {!isOpening && trade.pnl !== undefined && (
+                          <span style={{ 
+                            fontWeight: '700',
+                            color: trade.pnl >= 0 ? '#10b981' : '#ef4444'
+                          }}>
+                            P&L: {formatCurrency(trade.pnl)}
+                          </span>
+                        )}
+                        <span>Balance: {formatCurrency(trade.balance_after)}</span>
+                      </div>
+                      <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: '#9ca3af' }}>
+                        {new Date(trade.timestamp).toLocaleString()}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

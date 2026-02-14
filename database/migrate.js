@@ -43,6 +43,7 @@ async function migrate() {
         pnl DECIMAL(20, 8) DEFAULT 0,
         balance_after DECIMAL(20, 8) NOT NULL,
         timestamp TIMESTAMP NOT NULL,
+        trade_type VARCHAR(20),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -54,15 +55,19 @@ async function migrate() {
       CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
       CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
       CREATE INDEX IF NOT EXISTS idx_trades_action ON trades(action);
+      CREATE INDEX IF NOT EXISTS idx_trades_type ON trades(trade_type);
     `);
     console.log('✓ Indexes created');
 
     console.log('\n✅ Migration completed successfully!');
-    console.log('\nRealistic Trading Features:');
+    console.log('\nFutures Trading Features:');
+    console.log('  • OPEN LONG: BUY first (profit if price goes UP)');
+    console.log('  • OPEN SHORT: SELL first (profit if price goes DOWN)');
     console.log('  • Signal Price: What TradingView sent');
     console.log('  • Execution Price: What you actually got (with slippage)');
     console.log('  • Slippage: Default 0.1% (configurable per bot)');
     console.log('  • Commission: Default 0.05% per trade (Pionex rate)');
+    console.log('  • FIFO Matching: First-In-First-Out position tracking');
     
   } catch (error) {
     console.error('❌ Migration failed:', error);
