@@ -165,35 +165,39 @@ app.get('/api/bots/:id', authenticateToken, async (req, res) => {
     let totalPnl = 0;
     let winningTrades = 0;
     let losingTrades = 0;
-    const dailyBalance = {};
-    const dailyPnl = {};
+
+    // Build per-trade balance history
+    const balanceHistory = [];
+    
+    // Add starting point
+    if (trades.length > 0) {
+      balanceHistory.push({
+        timestamp: new Date(bot.created_at).toISOString(),
+        balance: parseFloat(bot.starting_balance),
+        trade_id: null,
+        action: 'start'
+      });
+    }
 
     trades.forEach(trade => {
       const pnl = parseFloat(trade.pnl) || 0;
-      const date = new Date(trade.timestamp).toISOString().split('T')[0];
       
-      if (trade.action === 'sell') {
+      if (trade.action === 'sell' && pnl !== 0) {
         totalPnl += pnl;
-        
         if (pnl > 0) winningTrades++;
         else if (pnl < 0) losingTrades++;
-
-        // Daily PnL
-        dailyPnl[date] = (dailyPnl[date] || 0) + pnl;
       }
 
-      // Track balance after each trade
-      dailyBalance[date] = parseFloat(trade.balance_after);
+      // Add each trade to balance history
+      balanceHistory.push({
+        timestamp: trade.timestamp,
+        balance: parseFloat(trade.balance_after),
+        trade_id: trade.id,
+        action: trade.action,
+        symbol: trade.symbol,
+        pnl: pnl
+      });
     });
-
-    // Convert to array for chart
-    const balanceHistory = Object.keys(dailyBalance)
-      .sort()
-      .map(date => ({
-        date,
-        balance: dailyBalance[date],
-        pnl: dailyPnl[date] || 0
-      }));
 
     const totalTrades = winningTrades + losingTrades;
     const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
@@ -215,7 +219,8 @@ app.get('/api/bots/:id', authenticateToken, async (req, res) => {
         position_size: parseFloat(t.position_size),
         commission: parseFloat(t.commission),
         pnl: parseFloat(t.pnl),
-        balance_after: parseFloat(t.balance_after)
+        balance_after: parseFloat(t.balance_after),
+        trade_type: t.trade_type
       })),
       stats: {
         total_trades: trades.length,
@@ -342,29 +347,23 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
     const symbol = webhookData.symbol;
     const timestamp = webhookData.time || new Date().toISOString();
 
-    if (!action || !signalPrice || !symbol) {
+    if (!action || !signalPrice || !symbol || !contracts) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Missing required fields: action, price, symbol' });
+      return res.status(400).json({ error: 'Missing required fields: action, price, symbol, contracts' });
     }
 
-    // REALISTIC EXECUTION: Apply slippage to simulate real market conditions
+    // Apply slippage
     const slippagePercent = parseFloat(bot.slippage_percent);
     let executionPrice;
     
     if (action === 'buy') {
-      // BUY: You pay MORE than the signal price (slippage against you)
       executionPrice = signalPrice * (1 + slippagePercent);
     } else if (action === 'sell') {
-      // SELL: You get LESS than the signal price (slippage against you)
       executionPrice = signalPrice * (1 - slippagePercent);
     } else {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Invalid action: must be buy or sell' });
     }
-
-    // Calculate trade value with realistic execution price
-    const tradeValue = contracts * executionPrice;
-    const commission = tradeValue * parseFloat(bot.commission_rate);
 
     // Get current balance
     const balanceResult = await client.query(
@@ -373,66 +372,127 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
     );
     let currentBalance = parseFloat(balanceResult.rows[0].current_balance);
 
-    // Execute virtual trade
+    // Check current position for this symbol
+    const positionResult = await client.query(
+      `SELECT 
+        COALESCE(SUM(CASE 
+          WHEN action = 'buy' THEN contracts 
+          WHEN action = 'sell' THEN -contracts 
+        END), 0) as net_position,
+        (SELECT action FROM trades 
+         WHERE bot_id = $1 AND symbol = $2 
+         ORDER BY timestamp DESC LIMIT 1) as last_action
+       FROM trades 
+       WHERE bot_id = $1 AND symbol = $2`,
+      [bot_id, symbol]
+    );
+
+    const netPosition = parseFloat(positionResult.rows[0]?.net_position || 0);
+    const lastAction = positionResult.rows[0]?.last_action;
+
     let newBalance = currentBalance;
     let pnl = 0;
+    let tradeType = '';
 
-    if (action === 'buy') {
-      // BUY: Deduct cost + commission
-      const totalCost = tradeValue + commission;
-      
-      if (totalCost > currentBalance) {
+    // FUTURES LOGIC:
+    // Position = 0: Opening new position (LONG or SHORT)
+    // Position > 0: Open LONG, opposite action closes
+    // Position < 0: Open SHORT, opposite action closes
+
+    if (Math.abs(netPosition) < 0.0001) {
+      // NO OPEN POSITION - Opening new position
+      if (action === 'buy') {
+        tradeType = 'OPEN LONG';
+      } else {
+        tradeType = 'OPEN SHORT';
+      }
+
+      // Calculate margin/cost (for futures, we don't deduct full notional value)
+      // Using 1x leverage for simplicity - deduct the notional value as margin
+      const notionalValue = contracts * executionPrice;
+      const commission = notionalValue * parseFloat(bot.commission_rate);
+      const marginRequired = notionalValue + commission;
+
+      if (marginRequired > currentBalance) {
         await client.query('ROLLBACK');
         return res.status(400).json({ 
-          error: 'Insufficient balance',
-          required: totalCost.toFixed(2),
+          error: 'Insufficient balance for margin',
+          required: marginRequired.toFixed(2),
           available: currentBalance.toFixed(2)
         });
       }
-      
-      newBalance = currentBalance - totalCost;
-      
-      // Insert trade
+
+      // Deduct margin + commission
+      newBalance = currentBalance - commission;
+
       await client.query(
         `INSERT INTO trades 
-         (bot_id, symbol, action, signal_price, execution_price, contracts, position_size, commission, balance_after, timestamp) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [bot_id, symbol, action, signalPrice, executionPrice, contracts, position_size, commission, newBalance, timestamp]
+         (bot_id, symbol, action, signal_price, execution_price, contracts, position_size, commission, pnl, balance_after, timestamp, trade_type) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [bot_id, symbol, action, signalPrice, executionPrice, contracts, position_size, commission, 0, newBalance, timestamp, tradeType]
       );
 
-    } else if (action === 'sell') {
-      // SELL: Find matching buy to calculate PnL
-      const buyResult = await client.query(
-        `SELECT * FROM trades 
-         WHERE bot_id = $1 AND symbol = $2 AND action = 'buy' AND contracts > 0
-         ORDER BY timestamp DESC LIMIT 1`,
-        [bot_id, symbol]
-      );
+    } else {
+      // HAVE OPEN POSITION - Check if closing or adding
+      const isClosing = (netPosition > 0 && action === 'sell') || (netPosition < 0 && action === 'buy');
 
-      if (buyResult.rows.length > 0) {
-        const buyTrade = buyResult.rows[0];
-        const buyExecutionPrice = parseFloat(buyTrade.execution_price);
-        
-        // Calculate profit/loss using EXECUTION prices (not signal prices)
-        const buyCommission = parseFloat(buyTrade.commission);
-        const sellRevenue = executionPrice * contracts;
-        const buyCost = buyExecutionPrice * contracts;
-        
-        pnl = sellRevenue - buyCost - commission - buyCommission;
-        newBalance = currentBalance + sellRevenue - commission;
+      if (isClosing) {
+        // CLOSING POSITION
+        if (netPosition > 0) {
+          tradeType = 'CLOSE LONG';
+        } else {
+          tradeType = 'CLOSE SHORT';
+        }
+
+        // Find the opening trade(s) to calculate P&L
+        const openingTrades = await client.query(
+          `SELECT * FROM trades 
+           WHERE bot_id = $1 AND symbol = $2 AND trade_type LIKE 'OPEN%'
+           ORDER BY timestamp ASC`,
+          [bot_id, symbol]
+        );
+
+        if (openingTrades.rows.length === 0) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'No opening position found' });
+        }
+
+        // Use the first opening trade (FIFO)
+        const openingTrade = openingTrades.rows[0];
+        const entryPrice = parseFloat(openingTrade.execution_price);
+        const entryCommission = parseFloat(openingTrade.commission);
+
+        // Calculate close commission
+        const notionalValue = contracts * executionPrice;
+        const closeCommission = notionalValue * parseFloat(bot.commission_rate);
+
+        // Calculate P&L based on position direction
+        if (netPosition > 0) {
+          // CLOSING LONG: profit if price went UP
+          pnl = (executionPrice - entryPrice) * contracts - entryCommission - closeCommission;
+        } else {
+          // CLOSING SHORT: profit if price went DOWN
+          pnl = (entryPrice - executionPrice) * Math.abs(contracts) - entryCommission - closeCommission;
+        }
+
+        newBalance = currentBalance + pnl - closeCommission;
+
+        await client.query(
+          `INSERT INTO trades 
+           (bot_id, symbol, action, signal_price, execution_price, contracts, position_size, commission, pnl, balance_after, timestamp, trade_type) 
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          [bot_id, symbol, action, signalPrice, executionPrice, contracts, position_size, closeCommission, pnl, newBalance, timestamp, tradeType]
+        );
+
       } else {
-        // No matching buy, just add sell proceeds (shouldn't happen in real trading)
-        newBalance = currentBalance + (contracts * executionPrice) - commission;
-        pnl = 0;
+        // ADDING TO POSITION (same direction)
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          error: 'Adding to positions not supported yet',
+          current_position: netPosition,
+          suggestion: 'Close current position first'
+        });
       }
-
-      // Insert trade
-      await client.query(
-        `INSERT INTO trades 
-         (bot_id, symbol, action, signal_price, execution_price, contracts, position_size, commission, pnl, balance_after, timestamp) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-        [bot_id, symbol, action, signalPrice, executionPrice, contracts, position_size, commission, pnl, newBalance, timestamp]
-      );
     }
 
     // Update bot balance
@@ -443,29 +503,26 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
 
     await client.query('COMMIT');
 
-    const slippagePct = (slippagePercent * 100).toFixed(2);
-
-    console.log(`✅ Realistic trade executed for bot ${bot_id}:`, {
+    console.log(`✅ FUTURES trade executed for bot ${bot_id}:`, {
       symbol,
+      tradeType,
       action,
       signalPrice: signalPrice.toFixed(2),
       executionPrice: executionPrice.toFixed(2),
-      slippage: `${slippagePct}%`,
       contracts,
-      commission: commission.toFixed(2),
       pnl: pnl.toFixed(2),
+      oldBalance: currentBalance.toFixed(2),
       newBalance: newBalance.toFixed(2)
     });
 
     res.status(201).json({
-      message: 'Virtual trade executed with realistic slippage',
+      message: 'Futures trade executed successfully',
+      trade_type: tradeType,
       action,
       symbol,
       signal_price: signalPrice.toFixed(2),
       execution_price: executionPrice.toFixed(2),
-      slippage_applied: `${slippagePct}%`,
       contracts,
-      commission: commission.toFixed(2),
       pnl: pnl.toFixed(2),
       balance: newBalance.toFixed(2)
     });

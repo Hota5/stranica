@@ -1,10 +1,21 @@
 # TradingView Webhook Tracker
 
-A full-stack **automatic paper trading tracker** for TradingView crypto signals. Track your bot performance in real-time with zero manual work - webhooks automatically execute virtual trades, calculate P&L, and show beautiful performance analytics.
+A full-stack **automatic paper trading tracker** for TradingView futures/perpetuals signals. Track LONG and SHORT positions with realistic slippage, see exactly how your strategy would perform - **completely hands-free**!
+
+**✅ Supports FUTURES/PERPETUALS** - SELL to open SHORT, BUY to open LONG
+**✅ Supports SPOT** - Traditional buy then sell
 
 ![TradingView Tracker](https://img.shields.io/badge/Node.js-18+-green) ![React](https://img.shields.io/badge/React-18+-blue) ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15+-blue)
 
 ## ✨ Features
+
+### 🚀 Futures/Perpetuals Support
+- **LONG Positions** - BUY first, profit if price goes UP
+- **SHORT Positions** - SELL first, profit if price goes DOWN  
+- **Proper Direction Tracking** - Know if you're long or short
+- **FIFO Position Matching** - First-In-First-Out for accurate P&L
+- **Margin Validation** - Won't open positions you can't afford
+- **Trade Type Display** - See OPEN LONG, CLOSE SHORT, etc.
 
 ### 🎯 Realistic Forward Testing (NOT just backtesting!)
 - **Slippage Simulation** - Execution prices worse than signal prices
@@ -365,9 +376,11 @@ MIT License - feel free to use for personal or commercial projects
 ## 📚 Complete Documentation
 
 - **START_HERE.md** - Quick start guide
-- **REALISTIC_TESTING.md** - ⭐ **Understanding slippage & realistic forward testing**
+- **FUTURES_GUIDE.md** - ⭐ **Understanding futures/perpetuals (LONG/SHORT)**
+- **REALISTIC_TESTING.md** - Understanding slippage & realistic forward testing
 - **TRADINGVIEW_SETUP.md** - Webhook configuration
 - **DEPLOYMENT.md** - Production deployment guide
+- **BUGFIXES.md** - Recent bug fixes and improvements
 - **README.md** - This file (features & tech stack)
 
 ## 📧 Support
