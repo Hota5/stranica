@@ -407,22 +407,24 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
         tradeType = 'OPEN SHORT';
       }
 
-      // Calculate margin/cost (for futures, we don't deduct full notional value)
-      // Using 1x leverage for simplicity - deduct the notional value as margin
+      // Calculate notional value and commission
       const notionalValue = contracts * executionPrice;
       const commission = notionalValue * parseFloat(bot.commission_rate);
-      const marginRequired = notionalValue + commission;
 
-      if (marginRequired > currentBalance) {
+      // For paper trading: Check if they have enough balance to cover the position size
+      // (In real trading this would be margin requirement based on leverage)
+      if (notionalValue > currentBalance) {
         await client.query('ROLLBACK');
         return res.status(400).json({ 
-          error: 'Insufficient balance for margin',
-          required: marginRequired.toFixed(2),
-          available: currentBalance.toFixed(2)
+          error: 'Insufficient balance for position size',
+          required: notionalValue.toFixed(2),
+          available: currentBalance.toFixed(2),
+          note: 'Using 1x leverage - position size cannot exceed balance'
         });
       }
 
-      // Deduct margin + commission
+      // For paper trading: Only deduct commission on opening
+      // (The notional value is virtual - we don't actually hold the asset)
       newBalance = currentBalance - commission;
 
       await client.query(
@@ -475,7 +477,8 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
           pnl = (entryPrice - executionPrice) * Math.abs(contracts) - entryCommission - closeCommission;
         }
 
-        newBalance = currentBalance + pnl - closeCommission;
+        // Update balance: add the P&L (which already has commissions deducted)
+        newBalance = currentBalance + pnl;
 
         await client.query(
           `INSERT INTO trades 
