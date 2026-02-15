@@ -12,6 +12,9 @@ function BotDetail() {
   const [copiedWebhook, setCopiedWebhook] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [showLogsModal, setShowLogsModal] = useState(false);
+  const [logs, setLogs] = useState([]);
+  const [logsLoading, setLogsLoading] = useState(false);
   const [chartView, setChartView] = useState('all');
   
   // Edit form state
@@ -37,6 +40,20 @@ function BotDetail() {
       console.error('Failed to load bot:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadLogs = async () => {
+    setLogsLoading(true);
+    try {
+      const response = await bots.getLogs(id, 50);
+      setLogs(response.data);
+      setShowLogsModal(true);
+    } catch (error) {
+      console.error('Failed to load logs:', error);
+      alert('Failed to load webhook logs');
+    } finally {
+      setLogsLoading(false);
     }
   };
 
@@ -176,6 +193,9 @@ function BotDetail() {
           <div className="header-actions">
             <button className="btn btn-secondary" onClick={() => navigate('/')}>
               ← Dashboard
+            </button>
+            <button className="btn btn-primary btn-small" onClick={loadLogs} disabled={logsLoading}>
+              📋 {logsLoading ? 'Loading...' : 'Webhook Logs'}
             </button>
             <button className="btn btn-primary btn-small" onClick={() => setShowEditModal(true)}>
               ⚙️ Settings
@@ -419,6 +439,120 @@ function BotDetail() {
           </div>
         </div>
       </div>
+
+      {/* Webhook Logs Modal */}
+      {showLogsModal && (
+        <div className="modal-overlay" onClick={() => setShowLogsModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '900px', maxHeight: '80vh', overflow: 'auto' }}>
+            <h3>📋 Webhook Logs (Last 50)</h3>
+            
+            {logs.length === 0 ? (
+              <p style={{ textAlign: 'center', padding: '2rem', color: '#9ca3af' }}>
+                No webhook logs yet. Waiting for TradingView signals...
+              </p>
+            ) : (
+              <div style={{ marginTop: '1rem' }}>
+                {logs.map((log) => {
+                  const isSuccess = log.status === 'success';
+                  let requestData = {};
+                  let responseData = {};
+                  
+                  try {
+                    requestData = JSON.parse(log.request_body);
+                  } catch (e) {
+                    requestData = { error: 'Failed to parse' };
+                  }
+                  
+                  try {
+                    responseData = JSON.parse(log.response_body);
+                  } catch (e) {
+                    responseData = { error: 'Failed to parse' };
+                  }
+
+                  return (
+                    <div 
+                      key={log.id} 
+                      style={{
+                        background: isSuccess ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                        border: `1px solid ${isSuccess ? '#10b981' : '#ef4444'}`,
+                        borderRadius: '8px',
+                        padding: '1rem',
+                        marginBottom: '1rem'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+                        <span style={{ 
+                          fontWeight: '600',
+                          color: isSuccess ? '#10b981' : '#ef4444'
+                        }}>
+                          {isSuccess ? '✅ SUCCESS' : '❌ ERROR'}
+                        </span>
+                        <span style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
+                          {new Date(log.created_at).toLocaleString()}
+                        </span>
+                      </div>
+
+                      {!isSuccess && log.error_message && (
+                        <div style={{ 
+                          background: 'rgba(239, 68, 68, 0.2)',
+                          padding: '0.5rem',
+                          borderRadius: '4px',
+                          marginBottom: '0.5rem',
+                          color: '#ef4444',
+                          fontSize: '0.9rem'
+                        }}>
+                          <strong>Error:</strong> {log.error_message}
+                        </div>
+                      )}
+
+                      <details style={{ marginTop: '0.5rem' }}>
+                        <summary style={{ cursor: 'pointer', fontWeight: '600', marginBottom: '0.5rem' }}>
+                          📥 Request from TradingView
+                        </summary>
+                        <pre style={{ 
+                          background: '#1a1f3a',
+                          padding: '0.5rem',
+                          borderRadius: '4px',
+                          fontSize: '0.75rem',
+                          overflow: 'auto',
+                          maxHeight: '200px'
+                        }}>
+                          {JSON.stringify(requestData, null, 2)}
+                        </pre>
+                      </details>
+
+                      <details style={{ marginTop: '0.5rem' }}>
+                        <summary style={{ cursor: 'pointer', fontWeight: '600', marginBottom: '0.5rem' }}>
+                          📤 Response from Server
+                        </summary>
+                        <pre style={{ 
+                          background: '#1a1f3a',
+                          padding: '0.5rem',
+                          borderRadius: '4px',
+                          fontSize: '0.75rem',
+                          overflow: 'auto',
+                          maxHeight: '200px'
+                        }}>
+                          {JSON.stringify(responseData, null, 2)}
+                        </pre>
+                      </details>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <div className="modal-actions" style={{ marginTop: '1.5rem' }}>
+              <button className="btn btn-secondary" onClick={() => setShowLogsModal(false)}>
+                Close
+              </button>
+              <button className="btn btn-primary" onClick={loadLogs} disabled={logsLoading}>
+                {logsLoading ? 'Refreshing...' : '🔄 Refresh'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Edit Settings Modal */}
       {showEditModal && (

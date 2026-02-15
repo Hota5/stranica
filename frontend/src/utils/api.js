@@ -38,6 +38,7 @@ export const bots = {
   create: (data) => api.post('/api/bots', data),
   update: (id, data) => api.put(`/api/bots/${id}`, data),
   delete: (id) => api.delete(`/api/bots/${id}`),
+  getLogs: (id, limit = 50) => api.get(`/api/bots/${id}/logs?limit=${limit}`),
 };
 
 export default api;
