@@ -11,6 +11,9 @@ const { v4: uuidv4 } = require('uuid');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Trust proxy - needed when behind Nginx reverse proxy
+app.set('trust proxy', 1);
+
 // Database connection
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
@@ -298,10 +301,22 @@ app.put('/api/bots/:id', authenticateToken, async (req, res) => {
 
 // Update bot settings
 app.put('/api/bots/:id', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  
   try {
+    await client.query('BEGIN');
+    
     const { id } = req.params;
     const { name, slippage_percent, commission_rate, starting_balance } = req.body;
     
+    // Get current bot data
+    const currentBot = await client.query('SELECT * FROM bots WHERE id = $1', [id]);
+    if (currentBot.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Bot not found' });
+    }
+
+    const bot = currentBot.rows[0];
     const updates = [];
     const values = [];
     let paramCount = 1;
@@ -321,24 +336,48 @@ app.put('/api/bots/:id', authenticateToken, async (req, res) => {
       values.push(parseFloat(commission_rate) / 100);
       paramCount++;
     }
+    
+    // SPECIAL HANDLING for starting_balance
     if (starting_balance !== undefined) {
+      const newStartingBalance = parseFloat(starting_balance);
+      const oldStartingBalance = parseFloat(bot.starting_balance);
+      const oldCurrentBalance = parseFloat(bot.current_balance);
+      
+      // Calculate return percentage based on old values
+      const returnPct = oldStartingBalance > 0 
+        ? (oldCurrentBalance - oldStartingBalance) / oldStartingBalance 
+        : 0;
+      
+      // Apply same return percentage to new starting balance
+      const newCurrentBalance = newStartingBalance * (1 + returnPct);
+      
       updates.push(`starting_balance = $${paramCount}`);
-      values.push(parseFloat(starting_balance));
+      values.push(newStartingBalance);
       paramCount++;
+      
+      updates.push(`current_balance = $${paramCount}`);
+      values.push(newCurrentBalance);
+      paramCount++;
+      
+      console.log(`What-if calculation for bot ${id}:`, {
+        oldStarting: oldStartingBalance,
+        oldCurrent: oldCurrentBalance,
+        returnPct: (returnPct * 100).toFixed(2) + '%',
+        newStarting: newStartingBalance,
+        newCurrent: newCurrentBalance
+      });
     }
 
     if (updates.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: 'No fields to update' });
     }
 
     values.push(id);
     const query = `UPDATE bots SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING *`;
     
-    const result = await pool.query(query, values);
-    
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Bot not found' });
-    }
+    const result = await client.query(query, values);
+    await client.query('COMMIT');
 
     res.json({
       ...result.rows[0],
@@ -348,8 +387,11 @@ app.put('/api/bots/:id', authenticateToken, async (req, res) => {
       slippage_percent: parseFloat(result.rows[0].slippage_percent)
     });
   } catch (error) {
+    await client.query('ROLLBACK');
     console.error('Update bot error:', error);
     res.status(500).json({ error: 'Failed to update bot' });
+  } finally {
+    client.release();
   }
 });
 
@@ -430,22 +472,19 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
     let currentBalance = parseFloat(balanceResult.rows[0].current_balance);
 
     // Check current position for this symbol
+    // Only count OPEN trades since we delete them when closed
     const positionResult = await client.query(
       `SELECT 
         COALESCE(SUM(CASE 
-          WHEN action = 'buy' THEN contracts 
-          WHEN action = 'sell' THEN -contracts 
-        END), 0) as net_position,
-        (SELECT action FROM trades 
-         WHERE bot_id = $1 AND symbol = $2 
-         ORDER BY timestamp DESC LIMIT 1) as last_action
+          WHEN action = 'buy' AND trade_type = 'OPEN LONG' THEN contracts 
+          WHEN action = 'sell' AND trade_type = 'OPEN SHORT' THEN -contracts 
+        END), 0) as net_position
        FROM trades 
-       WHERE bot_id = $1 AND symbol = $2`,
+       WHERE bot_id = $1 AND symbol = $2 AND trade_type LIKE 'OPEN%'`,
       [bot_id, symbol]
     );
 
     const netPosition = parseFloat(positionResult.rows[0]?.net_position || 0);
-    const lastAction = positionResult.rows[0]?.last_action;
 
     let newBalance = currentBalance;
     let pnl = 0;
@@ -503,11 +542,13 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
           tradeType = 'CLOSE SHORT';
         }
 
-        // Find the opening trade(s) to calculate P&L
+        // Find the UNMATCHED opening trade (FIFO)
+        // We need to find opening trades that haven't been closed yet
         const openingTrades = await client.query(
           `SELECT * FROM trades 
            WHERE bot_id = $1 AND symbol = $2 AND trade_type LIKE 'OPEN%'
-           ORDER BY timestamp ASC`,
+           ORDER BY timestamp ASC
+           LIMIT 1`,
           [bot_id, symbol]
         );
 
@@ -516,32 +557,44 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
           return res.status(400).json({ error: 'No opening position found' });
         }
 
-        // Use the first opening trade (FIFO)
+        // Use the oldest opening trade (FIFO)
         const openingTrade = openingTrades.rows[0];
         const entryPrice = parseFloat(openingTrade.execution_price);
         const entryCommission = parseFloat(openingTrade.commission);
+        const openingContracts = parseFloat(openingTrade.contracts);
 
-        // Calculate close commission
-        const notionalValue = contracts * executionPrice;
-        const closeCommission = notionalValue * parseFloat(bot.commission_rate);
+        // Calculate close commission based on actual closing contracts
+        const closeCommission = contracts * executionPrice * parseFloat(bot.commission_rate);
 
-        // Calculate P&L based on position direction
+        // CORRECT FUTURES P&L CALCULATION
+        // P&L = (Price Difference) × Contracts - Total Fees
+        let priceDifference;
         if (netPosition > 0) {
           // CLOSING LONG: profit if price went UP
-          pnl = (executionPrice - entryPrice) * contracts - entryCommission - closeCommission;
+          priceDifference = executionPrice - entryPrice;
         } else {
           // CLOSING SHORT: profit if price went DOWN
-          pnl = (entryPrice - executionPrice) * Math.abs(contracts) - entryCommission - closeCommission;
+          priceDifference = entryPrice - executionPrice;
         }
 
-        // Update balance: add the P&L (which already has commissions deducted)
+        // P&L = price movement × contracts - commissions
+        pnl = (priceDifference * contracts) - entryCommission - closeCommission;
+
+        // Update balance: add only the P&L (not the notional value!)
         newBalance = currentBalance + pnl;
 
+        // Insert the closing trade
         await client.query(
           `INSERT INTO trades 
            (bot_id, symbol, action, signal_price, execution_price, contracts, position_size, commission, pnl, balance_after, timestamp, trade_type) 
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
           [bot_id, symbol, action, signalPrice, executionPrice, contracts, position_size, closeCommission, pnl, newBalance, timestamp, tradeType]
+        );
+
+        // CRITICAL FIX: Delete the matched opening trade to prevent reusing it
+        await client.query(
+          `DELETE FROM trades WHERE id = $1`,
+          [openingTrade.id]
         );
 
       } else {
