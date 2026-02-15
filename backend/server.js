@@ -106,9 +106,9 @@ app.get('/api/bots', authenticateToken, async (req, res) => {
     `);
 
     const bots = result.rows.map(bot => {
-      const totalPnl = parseFloat(bot.total_pnl) || 0;
       const currentBalance = parseFloat(bot.current_balance);
       const startingBalance = parseFloat(bot.starting_balance);
+      const totalPnl = currentBalance - startingBalance; // Real P&L = current - starting
       const totalTrades = parseInt(bot.total_trades) || 0;
       const winningTrades = parseInt(bot.winning_trades) || 0;
       const losingTrades = parseInt(bot.losing_trades) || 0;
@@ -124,6 +124,7 @@ app.get('/api/bots', authenticateToken, async (req, res) => {
         starting_balance: startingBalance,
         current_balance: currentBalance,
         commission_rate: parseFloat(bot.commission_rate),
+        slippage_percent: parseFloat(bot.slippage_percent),
         stats: {
           total_trades: totalTrades,
           completed_trades: completedTrades,
@@ -162,7 +163,9 @@ app.get('/api/bots/:id', authenticateToken, async (req, res) => {
     const trades = tradesResult.rows;
     
     // Calculate detailed stats
-    let totalPnl = 0;
+    const currentBalance = parseFloat(bot.current_balance);
+    const startingBalance = parseFloat(bot.starting_balance);
+    const totalPnl = currentBalance - startingBalance; // Real P&L = difference
     let winningTrades = 0;
     let losingTrades = 0;
 
@@ -173,7 +176,7 @@ app.get('/api/bots/:id', authenticateToken, async (req, res) => {
     if (trades.length > 0) {
       balanceHistory.push({
         timestamp: new Date(bot.created_at).toISOString(),
-        balance: parseFloat(bot.starting_balance),
+        balance: startingBalance,
         trade_id: null,
         action: 'start'
       });
@@ -182,8 +185,7 @@ app.get('/api/bots/:id', authenticateToken, async (req, res) => {
     trades.forEach(trade => {
       const pnl = parseFloat(trade.pnl) || 0;
       
-      if (trade.action === 'sell' && pnl !== 0) {
-        totalPnl += pnl;
+      if (trade.trade_type && trade.trade_type.includes('CLOSE') && pnl !== 0) {
         if (pnl > 0) winningTrades++;
         else if (pnl < 0) losingTrades++;
       }
@@ -201,8 +203,6 @@ app.get('/api/bots/:id', authenticateToken, async (req, res) => {
 
     const totalTrades = winningTrades + losingTrades;
     const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
-    const currentBalance = parseFloat(bot.current_balance);
-    const startingBalance = parseFloat(bot.starting_balance);
     const returnPct = startingBalance > 0 ? ((currentBalance - startingBalance) / startingBalance) * 100 : 0;
 
     res.json({
@@ -289,6 +289,63 @@ app.put('/api/bots/:id', authenticateToken, async (req, res) => {
       ...result.rows[0],
       starting_balance: parseFloat(result.rows[0].starting_balance),
       commission_rate: parseFloat(result.rows[0].commission_rate)
+    });
+  } catch (error) {
+    console.error('Update bot error:', error);
+    res.status(500).json({ error: 'Failed to update bot' });
+  }
+});
+
+// Update bot settings
+app.put('/api/bots/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, slippage_percent, commission_rate, starting_balance } = req.body;
+    
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+
+    if (name !== undefined) {
+      updates.push(`name = $${paramCount}`);
+      values.push(name);
+      paramCount++;
+    }
+    if (slippage_percent !== undefined) {
+      updates.push(`slippage_percent = $${paramCount}`);
+      values.push(parseFloat(slippage_percent) / 100);
+      paramCount++;
+    }
+    if (commission_rate !== undefined) {
+      updates.push(`commission_rate = $${paramCount}`);
+      values.push(parseFloat(commission_rate) / 100);
+      paramCount++;
+    }
+    if (starting_balance !== undefined) {
+      updates.push(`starting_balance = $${paramCount}`);
+      values.push(parseFloat(starting_balance));
+      paramCount++;
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    values.push(id);
+    const query = `UPDATE bots SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING *`;
+    
+    const result = await pool.query(query, values);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Bot not found' });
+    }
+
+    res.json({
+      ...result.rows[0],
+      starting_balance: parseFloat(result.rows[0].starting_balance),
+      current_balance: parseFloat(result.rows[0].current_balance),
+      commission_rate: parseFloat(result.rows[0].commission_rate),
+      slippage_percent: parseFloat(result.rows[0].slippage_percent)
     });
   } catch (error) {
     console.error('Update bot error:', error);
