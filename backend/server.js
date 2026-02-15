@@ -531,19 +531,14 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
       );
 
     } else {
-      // HAVE OPEN POSITION - Check if closing or adding
+      // HAVE OPEN POSITION
       const isClosing = (netPosition > 0 && action === 'sell') || (netPosition < 0 && action === 'buy');
+      const absNetPosition = Math.abs(netPosition);
 
       if (isClosing) {
-        // CLOSING POSITION
-        if (netPosition > 0) {
-          tradeType = 'CLOSE LONG';
-        } else {
-          tradeType = 'CLOSE SHORT';
-        }
-
-        // Find the UNMATCHED opening trade (FIFO)
-        // We need to find opening trades that haven't been closed yet
+        // CLOSING or REVERSING POSITION
+        
+        // Find the opening trade (FIFO)
         const openingTrades = await client.query(
           `SELECT * FROM trades 
            WHERE bot_id = $1 AND symbol = $2 AND trade_type LIKE 'OPEN%'
@@ -557,17 +552,25 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
           return res.status(400).json({ error: 'No opening position found' });
         }
 
-        // Use the oldest opening trade (FIFO)
         const openingTrade = openingTrades.rows[0];
         const entryPrice = parseFloat(openingTrade.execution_price);
         const entryCommission = parseFloat(openingTrade.commission);
-        const openingContracts = parseFloat(openingTrade.contracts);
+        
+        // Determine how many contracts are CLOSING vs REVERSING
+        const contractsClosing = Math.min(contracts, absNetPosition);
+        const contractsReversing = Math.max(0, contracts - absNetPosition);
+        
+        // CLOSE THE EXISTING POSITION
+        if (netPosition > 0) {
+          tradeType = 'CLOSE LONG';
+        } else {
+          tradeType = 'CLOSE SHORT';
+        }
 
-        // Calculate close commission based on actual closing contracts
-        const closeCommission = contracts * executionPrice * parseFloat(bot.commission_rate);
+        // Calculate commission for the CLOSING portion only
+        const closeCommission = contractsClosing * executionPrice * parseFloat(bot.commission_rate);
 
-        // CORRECT FUTURES P&L CALCULATION
-        // P&L = (Price Difference) × Contracts - Total Fees
+        // Calculate P&L for CLOSING portion only
         let priceDifference;
         if (netPosition > 0) {
           // CLOSING LONG: profit if price went UP
@@ -577,10 +580,10 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
           priceDifference = entryPrice - executionPrice;
         }
 
-        // P&L = price movement × contracts - commissions
-        pnl = (priceDifference * contracts) - entryCommission - closeCommission;
+        // P&L = price movement × CLOSING contracts only - commissions
+        pnl = (priceDifference * contractsClosing) - entryCommission - closeCommission;
 
-        // Update balance: add only the P&L (not the notional value!)
+        // Update balance with P&L from closing
         newBalance = currentBalance + pnl;
 
         // Insert the closing trade
@@ -588,22 +591,60 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
           `INSERT INTO trades 
            (bot_id, symbol, action, signal_price, execution_price, contracts, position_size, commission, pnl, balance_after, timestamp, trade_type) 
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-          [bot_id, symbol, action, signalPrice, executionPrice, contracts, position_size, closeCommission, pnl, newBalance, timestamp, tradeType]
+          [bot_id, symbol, action, signalPrice, executionPrice, contractsClosing, position_size, closeCommission, pnl, newBalance, timestamp, tradeType]
         );
 
-        // CRITICAL FIX: Delete the matched opening trade to prevent reusing it
+        // Delete the matched opening trade
         await client.query(
           `DELETE FROM trades WHERE id = $1`,
           [openingTrade.id]
         );
 
+        // If there are REVERSING contracts, open opposite position
+        if (contractsReversing > 0) {
+          // Determine new position type
+          let reverseTradeType;
+          if (action === 'buy') {
+            reverseTradeType = 'OPEN LONG';
+          } else {
+            reverseTradeType = 'OPEN SHORT';
+          }
+
+          // Calculate commission for opening the reverse position
+          const reverseCommission = contractsReversing * executionPrice * parseFloat(bot.commission_rate);
+          
+          // Check if enough balance for reverse position
+          const reverseNotional = contractsReversing * executionPrice;
+          if (reverseNotional > newBalance) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ 
+              error: 'Insufficient balance for reverse position after closing',
+              required: reverseNotional.toFixed(2),
+              available: newBalance.toFixed(2)
+            });
+          }
+
+          // Deduct commission for opening reverse position
+          newBalance = newBalance - reverseCommission;
+
+          // Insert the reverse opening trade
+          await client.query(
+            `INSERT INTO trades 
+             (bot_id, symbol, action, signal_price, execution_price, contracts, position_size, commission, pnl, balance_after, timestamp, trade_type) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+            [bot_id, symbol, action, signalPrice, executionPrice, contractsReversing, position_size, reverseCommission, 0, newBalance, timestamp, reverseTradeType]
+          );
+
+          console.log(`🔄 Position reversed: Closed ${contractsClosing}, Opened ${contractsReversing} ${reverseTradeType}`);
+        }
+
       } else {
-        // ADDING TO POSITION (same direction)
+        // ADDING TO POSITION (same direction) - not supported
         await client.query('ROLLBACK');
         return res.status(400).json({ 
-          error: 'Adding to positions not supported yet',
+          error: 'Adding to positions not supported',
           current_position: netPosition,
-          suggestion: 'Close current position first'
+          suggestion: 'Close current position first or reverse it'
         });
       }
     }
