@@ -59,6 +59,27 @@ async function migrate() {
     `);
     console.log('✓ Indexes created');
 
+    // Create webhook_logs table for debugging
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS webhook_logs (
+        id SERIAL PRIMARY KEY,
+        bot_id UUID NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        status VARCHAR(20) NOT NULL,
+        request_body TEXT,
+        response_body TEXT,
+        error_message TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('✓ Webhook logs table created');
+
+    // Create index for webhook_logs
+    await pool.query(`
+      CREATE INDEX IF NOT EXISTS idx_webhook_logs_bot_id ON webhook_logs(bot_id);
+      CREATE INDEX IF NOT EXISTS idx_webhook_logs_created_at ON webhook_logs(created_at);
+    `);
+    console.log('✓ Webhook logs indexes created');
+
     console.log('\n✅ Migration completed successfully!');
     console.log('\nFutures Trading Features:');
     console.log('  • OPEN LONG: BUY first (profit if price goes UP)');

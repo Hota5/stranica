@@ -395,6 +395,34 @@ app.put('/api/bots/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Get webhook logs for a bot
+app.get('/api/bots/:id/logs', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const limit = parseInt(req.query.limit) || 50;
+    
+    const result = await pool.query(
+      `SELECT 
+        id,
+        status,
+        request_body,
+        response_body,
+        error_message,
+        created_at
+       FROM webhook_logs 
+       WHERE bot_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT $2`,
+      [id, limit]
+    );
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Get logs error:', error);
+    res.status(500).json({ error: 'Failed to fetch logs' });
+  }
+});
+
 // Delete bot
 app.delete('/api/bots/:id', authenticateToken, async (req, res) => {
   try {
@@ -422,6 +450,10 @@ app.delete('/api/bots/:id', authenticateToken, async (req, res) => {
 // Receive TradingView webhook and auto-execute virtual trade
 app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
   const client = await pool.connect();
+  const startTime = Date.now();
+  let logStatus = 'success';
+  let logResponse = '';
+  let logError = '';
   
   try {
     const { bot_id } = req.params;
@@ -432,7 +464,16 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
     // Verify bot exists
     const botResult = await client.query('SELECT * FROM bots WHERE id = $1', [bot_id]);
     if (botResult.rows.length === 0) {
-      await client.query('ROLLBACK');
+      logStatus = 'error';
+      logError = 'Bot not found';
+      logResponse = JSON.stringify({ error: 'Bot not found' });
+      
+      await client.query(
+        `INSERT INTO webhook_logs (bot_id, status, request_body, response_body, error_message) 
+         VALUES ($1, $2, $3, $4, $5)`,
+        [bot_id, logStatus, JSON.stringify(webhookData), logResponse, logError]
+      );
+      await client.query('COMMIT');
       return res.status(404).json({ error: 'Bot not found' });
     }
 
@@ -657,6 +698,20 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
 
     await client.query('COMMIT');
 
+    const executionTime = Date.now() - startTime;
+    logResponse = JSON.stringify({
+      message: 'Futures trade executed successfully',
+      trade_type: tradeType,
+      execution_time_ms: executionTime
+    });
+
+    // Log successful webhook
+    await client.query(
+      `INSERT INTO webhook_logs (bot_id, status, request_body, response_body, error_message) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [bot_id, 'success', JSON.stringify(webhookData), logResponse, null]
+    );
+
     console.log(`✅ FUTURES trade executed for bot ${bot_id}:`, {
       symbol,
       tradeType,
@@ -683,8 +738,25 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
 
   } catch (error) {
     await client.query('ROLLBACK');
+    
+    logStatus = 'error';
+    logError = error.message || 'Unknown error';
+    logResponse = JSON.stringify({ error: 'Failed to process webhook', details: error.message });
+    
+    // Log failed webhook
+    try {
+      await client.query(
+        `INSERT INTO webhook_logs (bot_id, status, request_body, response_body, error_message) 
+         VALUES ($1, $2, $3, $4, $5)`,
+        [req.params.bot_id, logStatus, JSON.stringify(req.body), logResponse, logError]
+      );
+      await client.query('COMMIT');
+    } catch (logErr) {
+      console.error('Failed to log webhook error:', logErr);
+    }
+    
     console.error('Webhook error:', error);
-    res.status(500).json({ error: 'Failed to process webhook' });
+    res.status(500).json({ error: 'Failed to process webhook', details: error.message });
   } finally {
     client.release();
   }
