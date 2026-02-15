@@ -11,7 +11,14 @@ function BotDetail() {
   const [loading, setLoading] = useState(true);
   const [copiedWebhook, setCopiedWebhook] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const [chartView, setChartView] = useState('all'); // all, hour, day, week, month
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [chartView, setChartView] = useState('all');
+  
+  // Edit form state
+  const [editName, setEditName] = useState('');
+  const [editSlippage, setEditSlippage] = useState('');
+  const [editCommission, setEditCommission] = useState('');
+  const [editStartingBalance, setEditStartingBalance] = useState('');
 
   useEffect(() => {
     loadBot();
@@ -21,6 +28,11 @@ function BotDetail() {
     try {
       const response = await bots.getById(id);
       setBot(response.data);
+      // Set edit form values
+      setEditName(response.data.name);
+      setEditSlippage((response.data.slippage_percent * 100).toFixed(2));
+      setEditCommission((response.data.commission_rate * 100).toFixed(2));
+      setEditStartingBalance(response.data.starting_balance.toString());
     } catch (error) {
       console.error('Failed to load bot:', error);
     } finally {
@@ -28,10 +40,44 @@ function BotDetail() {
     }
   };
 
-  const copyWebhookUrl = () => {
-    navigator.clipboard.writeText(bot.webhook_url);
-    setCopiedWebhook(true);
-    setTimeout(() => setCopiedWebhook(false), 2000);
+  const copyWebhookUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(bot.webhook_url);
+      setCopiedWebhook(true);
+      setTimeout(() => setCopiedWebhook(false), 2000);
+    } catch (error) {
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = bot.webhook_url;
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-999999px';
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        setCopiedWebhook(true);
+        setTimeout(() => setCopiedWebhook(false), 2000);
+      } catch (err) {
+        console.error('Failed to copy:', err);
+      }
+      document.body.removeChild(textArea);
+    }
+  };
+
+  const handleSaveSettings = async () => {
+    try {
+      await bots.update(id, {
+        name: editName,
+        slippage_percent: parseFloat(editSlippage),
+        commission_rate: parseFloat(editCommission),
+        starting_balance: parseFloat(editStartingBalance)
+      });
+      setShowEditModal(false);
+      loadBot(); // Reload to show updated values
+    } catch (error) {
+      console.error('Failed to update bot:', error);
+      alert('Failed to update settings');
+    }
   };
 
   const handleDeleteBot = async () => {
@@ -129,6 +175,9 @@ function BotDetail() {
           <div className="header-actions">
             <button className="btn btn-secondary" onClick={() => navigate('/')}>
               ← Dashboard
+            </button>
+            <button className="btn btn-primary btn-small" onClick={() => setShowEditModal(true)}>
+              ⚙️ Settings
             </button>
             <button className="btn btn-danger btn-small" onClick={() => setShowDeleteModal(true)}>
               <FiTrash2 /> Delete Bot
@@ -348,6 +397,90 @@ function BotDetail() {
           </div>
         </div>
       </div>
+
+      {/* Edit Settings Modal */}
+      {showEditModal && (
+        <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '500px' }}>
+            <h3>⚙️ Bot Settings</h3>
+            
+            <div className="form-group">
+              <label>Bot Name</label>
+              <input
+                type="text"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Starting Balance ($)</label>
+              <input
+                type="number"
+                step="0.01"
+                value={editStartingBalance}
+                onChange={(e) => setEditStartingBalance(e.target.value)}
+              />
+              <small style={{ color: '#9ca3af', marginTop: '0.3rem', display: 'block' }}>
+                Change this to see "what if" scenarios with different capital
+              </small>
+            </div>
+
+            <div className="form-group">
+              <label>Slippage (%)</label>
+              <input
+                type="number"
+                step="0.01"
+                value={editSlippage}
+                onChange={(e) => setEditSlippage(e.target.value)}
+              />
+              <small style={{ color: '#9ca3af', marginTop: '0.3rem', display: 'block' }}>
+                How much worse than signal price you get filled
+              </small>
+            </div>
+
+            <div className="form-group">
+              <label>Commission Rate (%)</label>
+              <input
+                type="number"
+                step="0.01"
+                value={editCommission}
+                onChange={(e) => setEditCommission(e.target.value)}
+              />
+              <small style={{ color: '#9ca3af', marginTop: '0.3rem', display: 'block' }}>
+                Fee per trade (Pionex: 0.05%, Binance: 0.1%)
+              </small>
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn btn-primary" onClick={handleSaveSettings}>
+                Save Changes
+              </button>
+              <button className="btn btn-secondary" onClick={() => setShowEditModal(false)}>
+                Cancel
+              </button>
+            </div>
+
+            <div style={{ 
+              marginTop: '1.5rem', 
+              padding: '1rem', 
+              background: 'rgba(239, 68, 68, 0.1)',
+              borderRadius: '8px',
+              fontSize: '0.85rem',
+              color: '#9ca3af'
+            }}>
+              <p><strong style={{ color: '#ef4444' }}>⚠️ Note:</strong></p>
+              <p style={{ marginTop: '0.5rem' }}>
+                Changing <strong>starting balance</strong> will recalculate your return % and P&L, 
+                but won't affect your actual trade history or current balance.
+              </p>
+              <p style={{ marginTop: '0.5rem' }}>
+                This is useful for "what if" analysis - e.g., "what if I started with $500 instead of $100?"
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Confirmation Modal */}
       {showDeleteModal && (
