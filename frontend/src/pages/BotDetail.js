@@ -126,6 +126,7 @@ function BotDetail() {
         const itemDate = new Date(item.timestamp);
         return !isNaN(itemDate.getTime()) && itemDate >= cutoffTime;
       })
+      .reverse() // ← FIX: Reverse so oldest is on left, newest on right
       .map((item, index) => {
         const date = new Date(item.timestamp);
         const timeStr = date.toLocaleString('en-US', { 
@@ -335,8 +336,7 @@ function BotDetail() {
               bot.trades.map(trade => {
                 const tradeType = trade.trade_type || (trade.action === 'buy' ? 'BUY' : 'SELL');
                 const isOpening = tradeType.includes('OPEN');
-                const isLong = tradeType.includes('LONG');
-                const isShort = tradeType.includes('SHORT');
+                const isClosing = tradeType.includes('CLOSE');
                 
                 let emoji = '📊';
                 let typeColor = '#667eea';
@@ -353,6 +353,19 @@ function BotDetail() {
                 } else if (tradeType === 'CLOSE SHORT') {
                   emoji = '🔓';
                   typeColor = '#ef4444';
+                }
+
+                // Calculate percentage return for this trade (for closing trades)
+                let tradeReturnPct = 0;
+                if (isClosing && trade.pnl !== undefined) {
+                  // Find the previous balance (before this trade)
+                  const tradeIndex = bot.trades.indexOf(trade);
+                  const prevTrade = bot.trades[tradeIndex + 1]; // trades are in reverse chronological order
+                  const prevBalance = prevTrade ? parseFloat(prevTrade.balance_after) : parseFloat(bot.starting_balance);
+                  
+                  if (prevBalance > 0) {
+                    tradeReturnPct = (parseFloat(trade.pnl) / prevBalance) * 100;
+                  }
                 }
 
                 return (
@@ -376,13 +389,22 @@ function BotDetail() {
                         </span>
                         <span>Contracts: {trade.contracts}</span>
                         <span>Fee: {formatCurrency(trade.commission)}</span>
-                        {!isOpening && trade.pnl !== undefined && (
-                          <span style={{ 
-                            fontWeight: '700',
-                            color: trade.pnl >= 0 ? '#10b981' : '#ef4444'
-                          }}>
-                            P&L: {formatCurrency(trade.pnl)}
-                          </span>
+                        {isClosing && trade.pnl !== undefined && (
+                          <>
+                            <span style={{ 
+                              fontWeight: '700',
+                              color: trade.pnl >= 0 ? '#10b981' : '#ef4444'
+                            }}>
+                              P&L: {formatCurrency(trade.pnl)}
+                            </span>
+                            <span style={{ 
+                              fontWeight: '600',
+                              fontSize: '0.9rem',
+                              color: tradeReturnPct >= 0 ? '#10b981' : '#ef4444'
+                            }}>
+                              {tradeReturnPct >= 0 ? '+' : ''}{tradeReturnPct.toFixed(2)}%
+                            </span>
+                          </>
                         )}
                         <span>Balance: {formatCurrency(trade.balance_after)}</span>
                       </div>
