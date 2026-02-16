@@ -489,7 +489,23 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
 
     if (!action || !signalPrice || !symbol || !contracts) {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Missing required fields: action, price, symbol, contracts' });
+
+      logStatus = 'error';
+      logError = 'Missing required fields: action, price, symbol, contracts';
+      logResponse = JSON.stringify({ error: logError });
+
+      try {
+        await client.query(
+          `INSERT INTO webhook_logs (bot_id, status, request_body, response_body, error_message) 
+           VALUES ($1, $2, $3, $4, $5)`,
+          [bot_id, logStatus, JSON.stringify(webhookData), logResponse, logError]
+        );
+        await client.query('COMMIT');
+      } catch (logErr) {
+        console.error('Failed to log webhook validation error:', logErr);
+      }
+
+      return res.status(400).json({ error: logError });
     }
 
     // Apply slippage
@@ -595,11 +611,17 @@ app.post('/webhook/:bot_id', webhookLimiter, async (req, res) => {
 
         const openingTrade = openingTrades.rows[0];
         const entryPrice = parseFloat(openingTrade.execution_price);
-        const entryCommission = parseFloat(openingTrade.commission);
+        const entryCommissionTotal = parseFloat(openingTrade.commission);
+        const openingContracts = parseFloat(openingTrade.contracts || contracts);
         
         // Determine how many contracts are CLOSING vs REVERSING
         const contractsClosing = Math.min(contracts, absNetPosition);
         const contractsReversing = Math.max(0, contracts - absNetPosition);
+
+        // Allocate entry commission proportionally to the closing portion
+        const closingProportion =
+          openingContracts > 0 ? (contractsClosing / openingContracts) : 1;
+        const entryCommission = entryCommissionTotal * closingProportion;
         
         // CLOSE THE EXISTING POSITION
         if (netPosition > 0) {

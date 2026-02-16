@@ -143,7 +143,8 @@ function BotDetail() {
         const itemDate = new Date(item.timestamp);
         return !isNaN(itemDate.getTime()) && itemDate >= cutoffTime;
       })
-      .reverse() // ← FIX: Reverse so oldest is on left, newest on right
+      .slice()
+      .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)) // Oldest on left, newest on right
       .map((item, index) => {
         const date = new Date(item.timestamp);
         const timeStr = date.toLocaleString('en-US', { 
@@ -627,8 +628,8 @@ function BotDetail() {
             }}>
               <p><strong style={{ color: '#ef4444' }}>⚠️ Note:</strong></p>
               <p style={{ marginTop: '0.5rem' }}>
-                Changing <strong>starting balance</strong> will recalculate your return % and P&L, 
-                but won't affect your actual trade history or current balance.
+                Changing <strong>starting balance</strong> is for "what if" analysis – it rescales your starting/current balance
+                and summary stats, but does not modify your underlying trade history.
               </p>
               <p style={{ marginTop: '0.5rem' }}>
                 This is useful for "what if" analysis - e.g., "what if I started with $500 instead of $100?"
